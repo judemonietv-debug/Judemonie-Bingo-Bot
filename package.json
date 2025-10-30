@@ -1,0 +1,13 @@
+{
+  "name": "telegram-point-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot for managing points and withdrawals.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "telebot": "^2.0.0" 
+  }
+}
+
