@@ -1,0 +1,13 @@
+{
+  "name": "telegram-point-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot for points and referrals.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node ./bot.js" 
+  },
+  "dependencies": {
+    "telebot": "1.4.1"
+  }
+}
+
