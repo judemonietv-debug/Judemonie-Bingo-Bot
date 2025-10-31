@@ -1,0 +1,26 @@
+{
+  "tasks": [
+    {
+      "id": "join_tg_channel",
+      "title": "Join our Telegram Channel",
+      "points": 100,
+      "type": "channel",
+      "link": "https://t.me/tokenscreene",
+      "username": "@tokenscreene"
+    },
+    {
+      "id": "twitter_follow",
+      "title": "Follow us on X/Twitter",
+      "points": 150,
+      "type": "social",
+      "link": "https://x.com/jude_bnb"
+    },
+    {
+      "id": "twitter_retweet",
+      "title": "Retweet the Pinned Post",
+      "points": 150,
+      "type": "social",
+      "link": "https://x.com/jude_bnb"
+    }
+  ]
+}
