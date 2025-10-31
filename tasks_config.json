@@ -1,0 +1,29 @@
+{
+  "tasks": [
+    {
+      "id": "join_tg_channel",
+      "title": "Join Telegram Group",
+      "link": "https://t.me/tokenscreene",
+      "username": "@tokenscreene",
+      "points": 500,
+      "type": "telegram_membership"
+    },
+    {
+      "id": "follow_on_x",
+      "title": "Follow on X (Twitter)",
+      "link": "https://x.com/jude_bnb",
+      "username": "@jude_bnb",
+      "points": 300,
+      "type": "honor_system"
+    },
+    {
+      "id": "setup_wallet",
+      "title": "Set Up Wallet Address",
+      "link": "/wallet",
+      "username": null,
+      "points": 200,
+      "type": "internal"
+    }
+  ]
+}
+
