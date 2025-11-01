@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BinGo ($BGO$) Airdrop Manager</title>
+    <!-- Telegram WebApp Script (MANDATORY) -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Firebase Imports and Main Logic -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, onSnapshot, collection, query, where, getDocs, addDoc, serverTimestamp, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- GLOBAL CONFIG & INITIALIZATION ---
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-airdrop-app';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? initialAuthToken : null;
+        
+        const ADMIN_ID = "7404076592"; 
+        const INITIAL_POINTS = 50;
+        const REFERRAL_BONUS = 100;
+        const MIN_WITHDRAW = 5000;
+        
+        let tgUserId = null;
+        let tgUsername = "UnknownUser";
+        let tgFirstName = "Guest";
+        let botUsernameFixed = 'BinGo_projectBot'; 
+
+        if (window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) {
+            const user = window.Telegram.WebApp.initDataUnsafe.user;
+            tgUserId = String(user.id);
+            tgUsername = user.username || 'user' + tgUserId;
+            tgFirstName = user.first_name || 'User';
+        } else {
+            tgUserId = "TEST_" + Math.floor(Math.random() * 1000000);
+            document.getElementById('app-status').textContent = '⚠️ Running in Test Mode';
+        }
+
+        // --- FIREBASE SETUP ---
+        
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        const getUsersCollection = () => collection(db, `artifacts/${appId}/public/airdrop_data/users`);
+        const getUserDoc = (id) => doc(db, `artifacts/${appId}/public/airdrop_data/users`, id);
+        const getWithdrawalsCollection = () => collection(db, `artifacts/${appId}/public/airdrop_data/withdrawals`);
+
+        let userData = null; 
+        
+        // --- UI UTILITIES (Simplified to use anchor tags) ---
+
+        const navTo = (pageId) => {
+            document.querySelectorAll('.page-content').forEach(el => el.classList.add('hidden'));
+            document.getElementById(pageId).classList.remove('hidden');
+            
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('bg-green-700', 'hover:bg-green-600', 'text-white');
+                btn.classList.add('bg-gray-800', 'hover:bg-gray-700', 'text-gray-400');
+            });
+            
+            const targetButton = document.getElementById(`btn-${pageId}`);
+            if (targetButton) {
+                targetButton.classList.remove('bg-gray-800', 'hover:bg-gray-700', 'text-gray-400');
+                targetButton.classList.add('bg-green-700', 'hover:bg-green-600', 'text-white');
+            }
+
+            if (pageId === 'admin-panel' && tgUserId === ADMIN_ID) {
+                updateAdminDashboard();
+            }
+            if (pageId === 'leaderboard') {
+                 updateLeaderboard(); 
+            }
+        };
+
+        const updateDisplay = () => {
+            if (!userData) {
+                 document.getElementById('app-status').textContent = 'Status: Authenticating...';
+                 return;
+            }
+
+            document.getElementById('app-status').textContent = tgUserId.startsWith('TEST_') ? '⚠️ Running in Test Mode' : 'Status: Connected';
+            
+            const referralLink = `https://t.me/${botUsernameFixed}?start=${tgUserId}`;
+            document.getElementById('referral-link-input').value = referralLink;
+            
+            document.getElementById('display-points').textContent = userData.points.toLocaleString();
+            document.getElementById('display-referrals').textContent = userData.referrals.toLocaleString();
+            document.getElementById('display-user-id').textContent = tgUserId;
+            document.getElementById('display-withdraw-points').textContent = userData.points.toLocaleString() + ' Points';
+            
+            const wallet = userData.wallet_address;
+            const walletStatusEl = document.getElementById('wallet-status-display');
+            if (wallet) {
+                walletStatusEl.innerHTML = `<span class="font-semibold text-green-400">✅ Wallet Set:</span> ${wallet.substring(0, 8)}...${wallet.substring(wallet.length - 4)}`;
+                document.getElementById('wallet-input').value = wallet;
+            } else {
+                walletStatusEl.innerHTML = `<span class="font-semibold text-red-400">❌ Wallet Required.</span>`;
+            }
+
+            updateTasksUI();
+            
+            if (userData.referrals > 0) {
+                 fetchReferralList(tgUserId);
+            } else {
+                 document.getElementById('referral-list-container').innerHTML = '<p class="text-gray-400 text-sm text-center">No users referred yet. Share your link!</p>';
+            }
+
+            if (tgUserId === ADMIN_ID) {
+                document.getElementById('btn-admin-panel').classList.remove('hidden');
+            } else {
+                document.getElementById('btn-admin-panel').classList.add('hidden');
+            }
+        };
+
+        const updateTasksUI = () => {
+            if (!userData) return;
+            const tasks = userData.tasks || {};
+            const twitterStatus = tasks.twitter_submitted ? 
+                (tasks.twitter_approved ? '✅ Approved' : '🟡 Reviewing') : '❌ Not Submitted';
+            
+            const walletStatus = userData.wallet_address ? '✅ Completed' : '❌ Pending';
+
+            document.getElementById('task-wallet-status').textContent = walletStatus;
+            document.getElementById('task-twitter-status').textContent = twitterStatus;
+            document.getElementById('task-tg-status').textContent = '✅ Joined (Simulated)'; 
+
+            document.getElementById('tasks-submit-btn').disabled = tasks.twitter_submitted && !tasks.twitter_approved;
+        };
+
+        // --- DATA LOGIC (Rest of logic remains the same for brevity) ---
+        
+        const fetchReferralList = async (referrerId) => {
+             const q = query(getUsersCollection(), where("is_referred_by", "==", referrerId));
+             const container = document.getElementById('referral-list-container');
+             // ... rest of fetchReferralList logic
+             try {
+                const querySnapshot = await getDocs(q);
+                let listHtml = '';
+                
+                if (querySnapshot.empty) {
+                    listHtml = '<p class="text-gray-400 text-sm text-center">No users referred yet. Share your link!</p>';
+                } else {
+                    querySnapshot.forEach((doc, index) => {
+                        const referredUser = doc.data();
+                        listHtml += `<div class="text-xs text-gray-300 py-1 border-b border-gray-700">#${index + 1}: @${referredUser.username || referredUser.firstName}</div>`;
+                    });
+                }
+                container.innerHTML = listHtml;
+            } catch (e) {
+                container.innerHTML = '<p class="text-red-400 text-sm text-center">Failed to load referrals.</p>';
+            }
+        };
+
+
+        const initializeUser = async (userId) => {
+            const userRef = getUserDoc(userId);
+            const userSnap = await getDoc(userRef);
+            // ... rest of initializeUser logic
+            if (!userSnap.exists()) {
+                let referrerId = null;
+                try {
+                    const params = new URLSearchParams(window.Telegram.WebApp.initData);
+                    const startParam = params.get('start_param');
+                    if (startParam && startParam !== userId) {
+                        referrerId = startParam;
+                    }
+                } catch (e) {
+                    console.log("No valid start param found.");
+                }
+
+                const newUser = {
+                    username: tgUsername,
+                    firstName: tgFirstName,
+                    points: INITIAL_POINTS,
+                    referrals: 0,
+                    wallet_address: null,
+                    is_referred_by: referrerId,
+                    tasks: {
+                        twitter_submitted: false,
+                        twitter_approved: false
+                    },
+                    created_at: serverTimestamp(),
+                };
+                await setDoc(userRef, newUser);
+
+                if (referrerId) {
+                    const referrerRef = getUserDoc(referrerId);
+                    await runTransaction(db, async (transaction) => {
+                         const referrerSnap = await transaction.get(referrerRef);
+                         if (referrerSnap.exists()) {
+                             const currentRefPoints = referrerSnap.data().points || 0;
+                             const currentRefCount = referrerSnap.data().referrals || 0;
+                             transaction.update(referrerRef, {
+                                 points: currentRefPoints + REFERRAL_BONUS,
+                                 referrals: currentRefCount + 1
+                             });
+                         }
+                    }).catch(e => console.error("Referrer transaction failed:", e));
+                }
+                
+            }
+            startRealtimeListener(userId);
+        };
+        
+        const startRealtimeListener = (userId) => {
+            const userRef = getUserDoc(userId);
+            onSnapshot(userRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    userData = docSnap.data();
+                    updateDisplay();
+                } else {
+                     if (tgUserId && !tgUserId.startsWith('TEST_')) {
+                        initializeUser(tgUserId);
+                     }
+                }
+            }, (error) => {
+                console.error("User data listener failed:", error);
+            });
+        };
+
+        const handleWalletSave = async () => { /* ... */
+            const address = document.getElementById('wallet-input').value.trim();
+            if (!address || !/0x[a-fA-F0-9]{40}/.test(address)) {
+                alert('Invalid BSC address format. Must start with 0x and be 42 characters long.');
+                return;
+            }
+            try {
+                await updateDoc(getUserDoc(tgUserId), { wallet_address: address });
+                alert('Wallet saved successfully!');
+            } catch (error) {
+                console.error("Error saving wallet:", error);
+                alert('Failed to save wallet. Try again.');
+            }
+        };
+
+        const handleTaskSubmission = async () => { /* ... */
+             const proof = document.getElementById('tasks-proof-input').value.trim();
+            if (!proof || (!proof.includes('x.com/') && !proof.includes('twitter.com/'))) {
+                 alert('Please enter a valid X (Twitter) profile URL.');
+                 return;
+            }
+
+            try {
+                await updateDoc(getUserDoc(tgUserId), {
+                    'tasks.twitter_submitted': true,
+                    'tasks.twitter_proof_link': proof,
+                    'tasks.twitter_approved': false 
+                });
+                alert('X Profile submitted for review!');
+                document.getElementById('tasks-proof-input').value = '';
+            } catch (error) {
+                 console.error("Error submitting task:", error);
+                 alert('Failed to submit task. Try again.');
+            }
+        };
+
+        const handleWithdrawalRequest = async () => { /* ... */
+            const amountStr = document.getElementById('withdraw-amount-input').value.trim();
+            const amount = parseInt(amountStr);
+
+            if (!userData.wallet_address) {
+                alert('Wallet not set! Please use the Tasks page to add your BSC wallet.');
+                return;
+            }
+            if (isNaN(amount) || amount < MIN_WITHDRAW) {
+                alert(`Withdrawal must be a number greater than or equal to ${MIN_WITHDRAW.toLocaleString()} points.`);
+                return;
+            }
+            if (amount > userData.points) {
+                alert(`You do not have enough points. Current balance: ${userData.points.toLocaleString()}.`);
+                return;
+            }
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const userRef = getUserDoc(tgUserId);
+                    const userSnap = await transaction.get(userRef);
+                    if (!userSnap.exists()) throw "User document not found!";
+
+                    const currentPoints = userSnap.data().points;
+                    if (currentPoints < amount) throw "Insufficient balance.";
+
+                    transaction.update(userRef, { points: currentPoints - amount });
+
+                    const withdrawalRequest = {
+                        userId: tgUserId,
+                        username: tgUsername,
+                        amount: amount,
+                        wallet_address: userData.wallet_address,
+                        status: 'PENDING',
+                        timestamp: serverTimestamp()
+                    };
+                    const newWithdrawalRef = doc(getWithdrawalsCollection());
+                    transaction.set(newWithdrawalRef, withdrawalRequest);
+                });
+
+                alert('Withdrawal request submitted! Processing is manual.');
+                document.getElementById('withdraw-amount-input').value = '';
+            } catch (error) {
+                console.error("Withdrawal failed:", error);
+                alert('Withdrawal failed: ' + error);
+            }
+        };
+
+        // --- ADMIN LOGIC (Simplified) ---
+
+        let pendingWithdrawals = [];
+        let leaderboardData = [];
+
+        const updateAdminDashboard = () => {
+            const q = query(getWithdrawalsCollection(), where("status", "==", "PENDING"));
+            // ... rest of admin logic
+            onSnapshot(q, (snapshot) => {
+                pendingWithdrawals = [];
+                snapshot.forEach(doc => {
+                    pendingWithdrawals.push({ id: doc.id, ...doc.data() });
+                });
+                renderWithdrawalList();
+            }, (error) => {
+                 console.error("Admin listener failed:", error);
+            });
+        };
+
+        const renderWithdrawalList = () => {
+            const container = document.getElementById('admin-withdrawal-list');
+            container.innerHTML = '';
+             // ... rest of rendering logic
+            if (pendingWithdrawals.length === 0) {
+                container.innerHTML = '<p class="text-gray-400 text-center py-4">No pending withdrawals.</p>';
+                return;
+            }
+
+            pendingWithdrawals.forEach(req => {
+                const item = document.createElement('div');
+                item.className = 'bg-gray-800 p-4 rounded-lg shadow-md mb-3';
+                item.innerHTML = `
+                    <p class="text-sm text-gray-400">Request ID: ${req.id.substring(0, 8)}...</p>
+                    <p class="text-lg font-bold text-yellow-300">${req.amount.toLocaleString()} Points</p>
+                    <p class="text-sm text-gray-300">User: @${req.username} (${req.userId.substring(0, 8)}...)</p>
+                    <p class="text-xs break-all text-gray-500">Wallet: ${req.wallet_address}</p>
+                    <div class="mt-3 flex space-x-2">
+                        <button onclick="window.adminAction('${req.id}', 'approve')" class="bg-green-600 hover:bg-green-700 text-white text-sm px-3 py-1 rounded-full font-semibold">Approve</button>
+                        <button onclick="window.adminAction('${req.id}', 'cancel')" class="bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-1 rounded-full font-semibold">Cancel</button>
+                    </div>
+                `;
+                container.appendChild(item);
+            });
+        };
+        
+        window.adminAction = async (requestId, action) => {
+             if (tgUserId !== ADMIN_ID) return;
+             if (!confirm(`Are you sure you want to ${action} request ${requestId}?`)) return;
+
+             const withdrawalRef = doc(getWithdrawalsCollection(), requestId);
+             
+             try {
+                if (action === 'approve') {
+                    await updateDoc(withdrawalRef, { status: 'COMPLETED', processed_by: tgUserId, processed_at: serverTimestamp() });
+                    alert(`Request ${requestId.substring(0, 8)}... marked as COMPLETED. REMEMBER TO SEND FUNDS MANUALLY.`);
+                } else if (action === 'cancel') {
+                     await runTransaction(db, async (transaction) => {
+                        const withdrawalSnap = await transaction.get(withdrawalRef);
+                        if (!withdrawalSnap.exists() || withdrawalSnap.data().status !== 'PENDING') throw "Request not pending or already processed.";
+
+                        const requestData = withdrawalSnap.data();
+                        const userRef = getUserDoc(requestData.userId);
+                        const userSnap = await transaction.get(userRef);
+                        if (!userSnap.exists()) throw "User document not found for refund!";
+
+                        transaction.update(userRef, { points: userSnap.data().points + requestData.amount });
+                        transaction.update(withdrawalRef, { status: 'CANCELLED', processed_by: tgUserId, processed_at: serverTimestamp() });
+                    });
+                    alert(`Request ${requestId.substring(0, 8)}... cancelled and points refunded.`);
+                }
+             } catch (error) {
+                console.error(`Admin action failed (${action}):`, error);
+                alert(`Action failed: ${error}`);
+             }
+        };
+
+        // --- LEADERBOARD LOGIC ---
+
+        const updateLeaderboard = () => {
+            const usersRef = getUsersCollection();
+            const q = query(usersRef, where('points', '>=', 0)); 
+            
+            onSnapshot(q, (snapshot) => {
+                leaderboardData = [];
+                snapshot.forEach(doc => {
+                    leaderboardData.push({ id: doc.id, ...doc.data() });
+                });
+                
+                leaderboardData.sort((a, b) => b.points - a.points);
+                renderLeaderboardList();
+            });
+        };
+
+        const renderLeaderboardList = () => {
+            const container = document.getElementById('leaderboard-list');
+            container.innerHTML = '';
+            
+            if (leaderboardData.length === 0) {
+                 container.innerHTML = '<p class="text-gray-400 text-center py-4">Be the first to earn points!</p>';
+                 return;
+            }
+
+            leaderboardData.slice(0, 10).forEach((user, index) => {
+                const isCurrentUser = user.id === tgUserId;
+                const item = document.createElement('div');
+                item.className = `flex justify-between items-center p-3 rounded-lg ${isCurrentUser ? 'bg-yellow-900 border-2 border-yellow-500' : 'bg-gray-800'} mb-2`;
+                item.innerHTML = `
+                    <span class="text-lg font-bold w-1/12">${index + 1}.</span>
+                    <span class="font-semibold flex-grow ${isCurrentUser ? 'text-white' : 'text-gray-200'}">@${user.username || user.firstName}</span>
+                    <span class="text-lg font-extrabold text-teal-400">${user.points.toLocaleString()}</span>
+                `;
+                container.appendChild(item);
+            });
+        };
+
+
+        // --- INITIAL SETUP ---
+        
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                localUserId = user.uid;
+                await initializeUser(tgUserId); 
+                updateLeaderboard();
+                
+                // Set initial navigation to Dashboard
+                navTo('dashboard'); 
+
+            } else {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken).catch(e => {
+                        console.error("Custom token sign-in failed:", e);
+                        signInAnonymously(auth); 
+                    });
+                } else {
+                    await signInAnonymously(auth);
+                }
+            }
+        });
+
+        // Expose functions to window for onclick handlers
+        window.navTo = navTo;
+        window.handleWalletSave = handleWalletSave;
+        window.handleTaskSubmission = handleTaskSubmission;
+        window.handleWithdrawalRequest = handleWithdrawalRequest;
+    </script>
+    <style>
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: #1a1a1a; 
+            color: #e5e7eb;
+            padding-bottom: 70px;
+        }
+        .tab-button { 
+            transition: background-color 0.15s;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            min-width: 20%;
+        }
+        .card { 
+            background-color: #2a2a2a; 
+            border-radius: 1rem; 
+        }
+        input[type="text"], input[type="number"] {
+            background-color: #1a1a1a; 
+            border: 1px solid #3a3a3a;
+            color: #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 0.75rem;
+            width: 100%;
+        }
+        /* Fixed bottom navigation bar */
+        #bottom-nav {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background-color: #1f1f1f;
+            border-top: 1px solid #3a3a3a;
+            box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.4);
+            z-index: 10;
+        }
+        .page-content {
+            min-height: 100vh;
+        }
+    </style>
+</head>
+<body class="p-4">
+
+    <!-- Header & Status (Top) -->
+    <header class="text-center mb-6 pt-2">
+        <h1 class="text-2xl font-bold text-green-400">BinGo ($BGO$) Airdrop Bot</h1>
+        <p id="app-status" class="text-xs text-gray-500 mt-1">Status: Initializing...</p>
+    </header>
+    
+    <!-- --- PAGE CONTENT SECTIONS (Scrollable) --- -->
+
+    <!-- 1. Dashboard Page -->
+    <div id="dashboard" class="page-content">
+        <div class="card p-5 shadow-2xl mb-5">
+            <h2 class="text-xl font-semibold mb-3">Your Balance</h2>
+            <p class="text-4xl font-extrabold text-yellow-500 mb-4" id="display-points">0</p>
+            <p class="text-sm text-gray-400">Total Points</p>
+        </div>
+        
+        <div class="card p-5 shadow-2xl mb-5">
+            <h2 class="text-xl font-semibold mb-3">Referral & Link</h2>
+            <div class="flex items-center justify-between mb-4">
+                <p class="text-3xl font-extrabold text-teal-400" id="display-referrals">0</p>
+                <p class="text-sm text-gray-400">Total Referrals</p>
+            </div>
+            
+            <p class="text-sm font-medium mb-2 text-gray-300">Your Referral Link (100 Points Bonus)</p>
+            <div class="flex space-x-2 mb-4">
+                <input type="text" id="referral-link-input" readonly value="Loading link..." class="text-xs p-2 flex-grow bg-gray-900 border-gray-700">
+                <button onclick="navigator.clipboard.writeText(document.getElementById('referral-link-input').value).then(() => alert('Link copied!')).catch(() => alert('Copy failed, please copy manually.'));" class="bg-blue-600 hover:bg-blue-700 text-white px-3 rounded-lg text-sm font-semibold">Copy Link</button>
+            </div>
+
+            <p class="text-lg font-semibold mb-2 border-t border-gray-700 pt-3 text-yellow-300">Your Referral List</p>
+            <div id="referral-list-container" class="max-h-40 overflow-y-auto">
+                 <p class="text-gray-400 text-sm text-center">Loading referrals...</p>
+            </div>
+        </div>
+
+        <div class="card p-5 shadow-2xl">
+            <p class="text-xs text-gray-500">Your Unique ID: <span id="display-user-id">Loading...</span></p>
+        </div>
+    </div>
+
+    <!-- 2. Tasks Page -->
+    <div id="tasks" class="page-content hidden">
+        <h2 class="text-xl font-semibold mb-4 text-gray-200">Airdrop Tasks</h2>
+        
+        <div class="card p-5 shadow-2xl mb-5">
+            <ul class="space-y-3 text-sm">
+                <li class="flex justify-between items-center">
+                    <span>Connect BSC Wallet:</span>
+                    <span id="task-wallet-status" class="font-semibold text-red-400">❌ Pending</span>
+                </li>
+                <li class="flex justify-between items-center">
+                    <span>Follow X (@jude_bnb):</span>
+                    <span id="task-twitter-status" class="font-semibold text-red-400">❌ Not Submitted</span>
+                </li>
+                <li class="flex justify-between items-center">
+                    <span>Join Telegram Group:</span>
+                    <span id="task-tg-status" class="font-semibold text-green-400">✅ Joined (Simulated)</span>
+                </li>
+            </ul>
+            
+            <div class="mt-6 border-t border-gray-700 pt-4">
+                <p class="font-medium mb-3 text-lg text-yellow-300">Wallet Setup</p>
+                <p class="text-xs text-gray-400 mb-2" id="wallet-status-display">Wallet Status...</p>
+                <input type="text" id="wallet-input" placeholder="Enter or paste your BSC (BEP-20) address">
+                <button onclick="handleWalletSave()" class="mt-3 w-full bg-purple-600 hover:bg-purple-700 text-white py-2 rounded-lg font-semibold">Save Wallet Address</button>
+            </div>
+
+            <div class="mt-6 border-t border-gray-700 pt-4">
+                <p class="font-medium mb-3 text-lg text-yellow-300">Submit X Profile Proof</p>
+                <a href="https://x.com/jude_bnb" target="_blank" class="text-blue-400 text-sm hover:underline block mb-2">→ Link: Follow X (@jude_bnb)</a>
+                <input type="text" id="tasks-proof-input" placeholder="Paste your X profile URL (e.g. x.com/myusername)">
+                <button onclick="handleTaskSubmission()" id="tasks-submit-btn" class="mt-3 w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg font-semibold">Submit X Profile for Review</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Withdraw Page -->
+    <div id="withdraw" class="page-content hidden">
+        <h2 class="text-xl font-semibold mb-4 text-gray-200">Withdraw Points</h2>
+
+        <div class="card p-5 shadow-2xl mb-5">
+            <p class="text-sm font-medium text-gray-400">Current Balance:</p>
+            <p class="text-3xl font-extrabold text-yellow-500 mb-4" id="display-withdraw-points">0 Points</p>
+            <p class="text-xs text-red-400">Minimum Withdrawal: <span class="font-bold">5,000 Points</span></p>
+            
+            <div class="mt-4">
+                <label for="withdraw-amount-input" class="block text-sm font-medium mb-2">Withdrawal Amount (Points):</label>
+                <input type="number" id="withdraw-amount-input" placeholder="Enter amount (e.g., 5000)">
+            </div>
+            
+            <button onclick="handleWithdrawalRequest()" class="mt-5 w-full bg-red-600 hover:bg-red-700 text-white py-3 rounded-lg font-extrabold">SUBMIT MANUAL WITHDRAWAL</button>
+
+            <p class="text-xs text-gray-500 mt-4 text-center">Withdrawals are processed manually by the admin.</p>
+        </div>
+    </div>
+
+    <!-- 4. Leaderboard Page -->
+    <div id="leaderboard" class="page-content hidden">
+        <h2 class="text-xl font-semibold mb-4 text-gray-200">🏆 Top 10 Leaderboard</h2>
+        <div class="card p-5 shadow-2xl">
+            <div id="leaderboard-list" class="space-y-1">
+                <!-- Leaderboard entries rendered here -->
+                <p class="text-gray-400 text-center py-4">Loading Leaderboard...</p>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- 5. Admin Panel -->
+    <div id="admin-panel" class="page-content hidden">
+        <h2 class="text-xl font-semibold mb-4 text-red-500">ADMIN CONTROL PANEL</h2>
+        <div class="card p-5 shadow-2xl mb-5">
+             <p class="text-lg font-medium mb-4 text-yellow-300">Pending Withdrawal Requests</p>
+             <div id="admin-withdrawal-list">
+                 <!-- Withdrawal requests rendered here -->
+                 <p class="text-gray-400 text-center py-4">Loading requests...</p>
+             </div>
+        </div>
+        
+        <div class="card p-5 shadow-2xl mb-5">
+            <p class="text-lg font-medium mb-4 text-green-300">Admin Point Reward (Manual)</p>
+            <p class="text-xs text-gray-400 mb-3">To manually reward points or update a user's task status, you must use the Firestore console for security.</p>
+            <p class="text-xs text-gray-400">User ID to target: <span class="font-bold text-red-400" id="admin-target-user-id">...</span></p>
+        </div>
+    </div>
+
+    <!-- FIXED BOTTOM NAVIGATION -->
+    <nav id="bottom-nav" class="flex justify-between p-2 bg-gray-800">
+        <button id="btn-dashboard" onclick="navTo('dashboard')" class="tab-button flex-1 flex flex-col items-center justify-center bg-green-700 text-white hover:bg-green-600 text-sm font-semibold">
+            <span>🏠</span> Dashboard
+        </button>
+        <button id="btn-tasks" onclick="navTo('tasks')" class="tab-button flex-1 flex flex-col items-center justify-center bg-gray-800 text-gray-400 hover:bg-gray-700 text-sm font-semibold">
+            <span>📋</span> Tasks
+        </button>
+        <button id="btn-withdraw" onclick="navTo('withdraw')" class="tab-button flex-1 flex flex-col items-center justify-center bg-gray-800 text-gray-400 hover:bg-gray-700 text-sm font-semibold">
+            <span>💰</span> Withdraw
+        </button>
+        <button id="btn-leaderboard" onclick="navTo('leaderboard')" class="tab-button flex-1 flex flex-col items-center justify-center bg-gray-800 text-gray-400 hover:bg-gray-700 text-sm font-semibold">
+            <span>🏆</span> Board
+        </button>
+        <button id="btn-admin-panel" onclick="navTo('admin-panel')" class="tab-button flex-1 flex flex-col items-center justify-center bg-gray-800 text-red-400 hover:bg-gray-700 text-sm font-semibold hidden">
+            <span>👑</span> Admin
+        </button>
+    </nav>
+    
+</body>
+</html>
+
