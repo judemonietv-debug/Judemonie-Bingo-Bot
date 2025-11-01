@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BinGo ($BGO$) Airdrop Manager</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, updateDoc, query, collection, onSnapshot, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+        // Global Variables
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let app, db, auth, userId = null;
+        const ADMIN_ID = '7404076592'; // Your fixed Admin Telegram ID
+        const MIN_WITHDRAW = 5000;
+        const REFERRAL_BONUS = 100;
+        const INITIAL_POINTS = 50;
+
+        // Current user data object
+        window.userData = {
+            id: null,
+            is_admin: false,
+            points: 0,
+            wallet_address: null,
+            referrals: 0,
+            referred_by: null,
+            referral_list: [],
+            pending_withdrawals: []
+        };
+        
+        window.navTo = (target) => {
+            document.querySelectorAll('.page-content').forEach(p => p.classList.add('hidden'));
+            document.getElementById(target).classList.remove('hidden');
+
+            document.querySelectorAll('.nav-input').forEach(input => {
+                if (input.dataset.page === target) {
+                    input.checked = true;
+                }
+            });
+            window.scrollTo(0, 0);
+        };
+
+        // --- Core Authentication and Data Loading ---
+
+        const initApp = async () => {
+            try {
+                if (firebaseConfig) {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                } else {
+                    console.error("Firebase config is missing.");
+                    return;
+                }
+
+                const urlParams = new URLSearchParams(window.location.search);
+                const startParam = urlParams.get('start');
+                
+                let referrerId = null;
+                if (startParam) {
+                    try {
+                        // Check if the start parameter is a referral ID
+                        const potentialReferrer = parseInt(startParam);
+                        if (!isNaN(potentialReferrer) && potentialRefererer.toString().length > 5) {
+                            referrerId = potentialReferrer;
+                        }
+                    } catch (e) {
+                        console.warn("Invalid start parameter:", e);
+                    }
+                }
+                
+                // Sign in using custom token or anonymously
+                await new Promise(resolve => {
+                    onAuthStateChanged(auth, async (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            window.userData.id = userId;
+                            window.userData.is_admin = (userId === ADMIN_ID);
+                            
+                            // Check if user exists in Firestore
+                            const userRef = doc(db, `artifacts/${appId}/users/${userId}/data/user_profile`);
+                            const userSnap = await getDoc(userRef);
+
+                            if (!userSnap.exists()) {
+                                // NEW USER: Initialize profile
+                                const newUserDoc = {
+                                    id: userId,
+                                    username: auth.currentUser.displayName || "User",
+                                    joined: new Date().toISOString(),
+                                    points: INITIAL_POINTS,
+                                    wallet_address: null,
+                                    referred_by: referrerId && referrerId.toString() !== userId ? referrerId : null,
+                                    referrals: 0,
+                                    tasks: {}
+                                };
+                                await setDoc(userRef, newUserDoc);
+
+                                // Reward referrer (if exists and not self)
+                                if (referrerId && referrerId.toString() !== userId) {
+                                    const referrerRef = doc(db, `artifacts/${appId}/users/${referrerId}/data/user_profile`);
+                                    await updateDoc(referrerRef, {
+                                        points: db.FieldValue.increment(REFERRAL_BONUS),
+                                        referrals: db.FieldValue.increment(1)
+                                    }).catch(e => console.error("Referrer update failed:", e));
+                                }
+                            }
+                            
+                            // Start listening to user data changes
+                            setupListeners();
+                        } else {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        }
+                        resolve();
+                    });
+                });
+            } catch (error) {
+                console.error("Firebase Initialization Failed:", error);
+                document.getElementById('status-text').textContent = `Error: ${error.message}`;
+            }
+        };
+
+        const setupListeners = () => {
+            // 1. Listen to User Profile
+            const userRef = doc(db, `artifacts/${appId}/users/${userId}/data/user_profile`);
+            onSnapshot(userRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    window.userData.points = data.points || 0;
+                    window.userData.wallet_address = data.wallet_address;
+                    window.userData.referrals = data.referrals || 0;
+                    window.userData.referred_by = data.referred_by;
+                    
+                    document.getElementById('user-balance').textContent = window.userData.points.toLocaleString();
+                    document.getElementById('total-referrals').textContent = window.userData.referrals;
+                    document.getElementById('unique-user-id').textContent = userId;
+
+                    // Update Referral Link
+                    const refLink = `https://t.me/${window.Telegram.WebApp.initDataUnsafe.username}?start=${userId}`;
+                    document.getElementById('referral-link-input').value = refLink;
+                    document.getElementById('referral-link-input').setAttribute('data-link', refLink);
+                    document.getElementById('loading-status').textContent = 'Ready';
+                    
+                    // Show admin button if admin
+                    if (window.userData.is_admin) {
+                        document.getElementById('admin-nav-item').classList.remove('hidden');
+                        navTo('admin'); // Automatically navigate admin to the admin panel
+                    } else {
+                        document.getElementById('admin-nav-item').classList.add('hidden');
+                    }
+                    
+                    // Update Task Status
+                    const walletStatus = data.wallet_address ? 'text-green-400' : 'text-red-400';
+                    document.getElementById('wallet-status').className = `text-sm font-semibold ${walletStatus}`;
+                    document.getElementById('wallet-status').textContent = data.wallet_address ? 'Wallet Set' : 'REQUIRED';
+
+                    // Update Withdrawal status
+                    document.getElementById('withdraw-min-text').textContent = `Minimum Withdrawal: ${MIN_WITHDRAW.toLocaleString()} Points. Your Wallet: ${data.wallet_address ? data.wallet_address.substring(0, 8) + '...' : 'Not Set'}`;
+                }
+            });
+
+            // 2. Listen to Referral List (Query other users referred by this user)
+            const referredQuery = query(collection(db, `artifacts/${appId}/users/${userId}/data/referral_list`)); 
+            // Note: For simplicity, we are creating a subcollection list of referrals triggered by the referrer ID
+            onSnapshot(referredQuery, (querySnapshot) => {
+                const list = [];
+                querySnapshot.forEach((doc) => {
+                    list.push(doc.data().username || `User ${doc.id.substring(0, 6)}`);
+                });
+                window.userData.referral_list = list;
+                const refListContainer = document.getElementById('referral-list-container');
+                refListContainer.innerHTML = list.length > 0
+                    ? list.map(name => `<li class="text-sm py-1 border-b border-gray-700 last:border-b-0">👤 ${name}</li>`).join('')
+                    : `<p class="text-sm py-2 text-gray-400">No referrals yet. Share your link!</p>`;
+            });
+
+            // 3. Listen to Pending Withdrawals (Admin only)
+            if (window.userData.is_admin) {
+                const pendingQuery = query(collection(db, `artifacts/${appId}/public/data/withdrawals`));
+                onSnapshot(pendingQuery, (querySnapshot) => {
+                    window.userData.pending_withdrawals = [];
+                    querySnapshot.forEach((doc) => {
+                        window.userData.pending_withdrawals.push({ id: doc.id, ...doc.data() });
+                    });
+                    renderAdminPanel();
+                });
+            }
+        };
+
+        // --- Core Logic Functions ---
+
+        window.copyRefLink = () => {
+            const link = document.getElementById('referral-link-input').value;
+            if (link && link !== 'Loading link...') {
+                navigator.clipboard.writeText(link).then(() => {
+                    const button = document.getElementById('copy-button');
+                    button.textContent = 'Copied!';
+                    setTimeout(() => button.textContent = 'Copy Link', 2000);
+                }).catch(err => {
+                    console.error('Failed to copy text: ', err);
+                });
+            }
+        };
+
+        window.submitWallet = async () => {
+            const address = document.getElementById('wallet-input').value.trim();
+            if (!address || !is_valid_bsc_address(address)) {
+                document.getElementById('wallet-msg').textContent = 'Invalid BSC Address. Must start with 0x and be 42 chars long.';
+                document.getElementById('wallet-msg').classList.remove('text-green-400');
+                document.getElementById('wallet-msg').classList.add('text-red-400');
+                return;
+            }
+
+            try {
+                const userRef = doc(db, `artifacts/${appId}/users/${userId}/data/user_profile`);
+                await updateDoc(userRef, { wallet_address: address });
+                document.getElementById('wallet-msg').textContent = 'Wallet Saved Successfully!';
+                document.getElementById('wallet-msg').classList.remove('text-red-400');
+                document.getElementById('wallet-msg').classList.add('text-green-400');
+            } catch (e) {
+                console.error("Wallet save error:", e);
+                document.getElementById('wallet-msg').textContent = 'Error saving wallet.';
+            }
+        };
+        
+        window.submitWithdrawal = async () => {
+            const amountInput = document.getElementById('withdraw-amount-input');
+            const amount = parseInt(amountInput.value);
+
+            if (isNaN(amount) || amount < MIN_WITHDRAW || amount > window.userData.points) {
+                document.getElementById('withdraw-msg').textContent = `Invalid amount. Min is ${MIN_WITHDRAW.toLocaleString()}, Max is ${window.userData.points.toLocaleString()}.`;
+                document.getElementById('withdraw-msg').classList.add('text-red-400');
+                document.getElementById('withdraw-msg').classList.remove('text-green-400');
+                return;
+            }
+            if (!window.userData.wallet_address) {
+                document.getElementById('withdraw-msg').textContent = `Error: Wallet not set. Please go to Tasks.`;
+                return;
+            }
+
+            const withdrawalRef = doc(collection(db, `artifacts/${appId}/public/data/withdrawals`));
+            
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const userRef = doc(db, `artifacts/${appId}/users/${userId}/data/user_profile`);
+                    const userSnap = await transaction.get(userRef);
+
+                    if (!userSnap.exists()) throw "User profile not found.";
+
+                    const currentPoints = userSnap.data().points || 0;
+                    if (currentPoints < amount) throw "Insufficient points.";
+
+                    // 1. Deduct points
+                    transaction.update(userRef, { points: currentPoints - amount });
+
+                    // 2. Log withdrawal request
+                    transaction.set(withdrawalRef, {
+                        id: withdrawalRef.id,
+                        user_id: userId,
+                        username: auth.currentUser.displayName || 'Unknown User',
+                        wallet_address: window.userData.wallet_address,
+                        amount: amount,
+                        status: 'PENDING',
+                        requested_at: new Date().toISOString()
+                    });
+                });
+
+                document.getElementById('withdraw-msg').textContent = 'Withdrawal Submitted! Admin notified for manual processing.';
+                document.getElementById('withdraw-msg').classList.remove('text-red-400');
+                document.getElementById('withdraw-msg').classList.add('text-green-400');
+                amountInput.value = '';
+
+            } catch (e) {
+                console.error("Withdrawal transaction failed:", e);
+                document.getElementById('withdraw-msg').textContent = e.message || 'Transaction failed. Try again.';
+            }
+        };
+
+        // --- Admin Functions ---
+
+        const renderAdminPanel = () => {
+            const container = document.getElementById('pending-withdrawals-container');
+            const items = window.userData.pending_withdrawals.filter(w => w.status === 'PENDING');
+            
+            document.getElementById('admin-count').textContent = items.length;
+
+            if (items.length === 0) {
+                container.innerHTML = `<p class="text-sm py-4 text-gray-400">No pending withdrawal requests.</p>`;
+                return;
+            }
+
+            container.innerHTML = items.map(req => `
+                <div class="card p-4 mb-3 border border-yellow-700 space-y-2">
+                    <p class="text-sm font-semibold text-yellow-400">Request ID: ${req.id.substring(0, 8)}...</p>
+                    <p class="text-xl font-bold text-green-400">${req.amount.toLocaleString()} Points</p>
+                    <p class="text-xs text-gray-400">To User: ${req.username} (${req.user_id})</p>
+                    <p class="text-xs text-gray-400">Wallet: ${req.wallet_address.substring(0, 12)}...</p>
+                    <div class="flex space-x-2 mt-3">
+                        <button onclick="window.adminAction('${req.id}', 'approve')" class="bg-green-600 hover:bg-green-700 text-white text-sm px-3 py-1 rounded-lg">Approve (Sent)</button>
+                        <button onclick="window.adminAction('${req.id}', 'cancel')" class="bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-1 rounded-lg">Cancel/Refund</button>
+                    </div>
+                </div>
+            `).join('');
+        };
+
+        window.adminAction = async (requestId, action) => {
+            const reqRef = doc(db, `artifacts/${appId}/public/data/withdrawals/${requestId}`);
+            const reqSnap = await getDoc(reqRef);
+            if (!reqSnap.exists()) return alert('Request not found.');
+
+            const req = reqSnap.data();
+            const userRef = doc(db, `artifacts/${appId}/users/${req.user_id}/data/user_profile`);
+            
+            try {
+                if (action === 'approve') {
+                    // 1. Mark request as completed
+                    await updateDoc(reqRef, { status: 'COMPLETED', processed_at: new Date().toISOString() });
+                    alert(`Approved: ${req.amount} sent to ${req.wallet_address}. Transaction logged.`);
+                } else if (action === 'cancel') {
+                    // 1. Mark request as cancelled
+                    await updateDoc(reqRef, { status: 'CANCELLED', processed_at: new Date().toISOString() });
+                    // 2. Refund points
+                    await updateDoc(userRef, { points: db.FieldValue.increment(req.amount) });
+                    alert(`Cancelled: ${req.amount} points refunded to user ${req.user_id}.`);
+                }
+            } catch (e) {
+                console.error("Admin action failed:", e);
+                alert(`Action failed: ${e.message}`);
+            }
+        };
+        
+        // --- Initialize the App ---
+        document.addEventListener('DOMContentLoaded', initApp);
+    </script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #1a1a1a; color: #e5e7eb; padding-bottom: 6rem; /* Space for the fixed bottom nav */ }
+        .page-content { transition: opacity 0.2s ease-in-out; }
+        .card { background-color: #2a2a2a; border-radius: 1rem; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); }
+        .nav-link { 
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 0.5rem 0;
+            color: #9ca3af; 
+            transition: color 0.2s;
+            cursor: pointer;
+            user-select: none;
+        }
+        .nav-input { display: none; }
+        .nav-input:checked + .nav-link { color: #10b981; } /* Green color for active tab */
+        
+        .tab-content { display: none; }
+        
+        /* Pure CSS Navigation: Target the content based on checked radio state */
+        #radio-dashboard:checked ~ #page-wrapper #dashboard { display: block; }
+        #radio-tasks:checked ~ #page-wrapper #tasks { display: block; }
+        #radio-withdraw:checked ~ #page-wrapper #withdraw { display: block; }
+        #radio-board:checked ~ #page-wrapper #board { display: block; }
+        #radio-admin:checked ~ #page-wrapper #admin { display: block; }
+    </style>
+</head>
+<body class="min-h-screen">
+
+    <!-- Header -->
+    <header class="p-4 border-b border-gray-800 bg-[#2a2a2a] sticky top-0 z-10">
+        <h1 class="text-3xl font-extrabold text-center text-green-400">BinGo ($BGO$) Airdrop Bot</h1>
+        <p id="loading-status" class="text-center text-sm font-semibold text-yellow-500 mt-1">Status: Initializing...</p>
+    </header>
+
+    <!-- Hidden Radio Inputs for Pure CSS Navigation -->
+    <input type="radio" id="radio-dashboard" name="nav-group" class="nav-input" data-page="dashboard" checked>
+    <input type="radio" id="radio-tasks" name="nav-group" class="nav-input" data-page="tasks">
+    <input type="radio" id="radio-withdraw" name="nav-group" class="nav-input" data-page="withdraw">
+    <input type="radio" id="radio-board" name="nav-group" class="nav-input" data-page="board">
+    <input type="radio" id="radio-admin" name="nav-group" class="nav-input" data-page="admin">
+
+    <!-- Page Wrapper -->
+    <div id="page-wrapper" class="p-4">
+        
+        <!-- ============================================== -->
+        <!-- 1. DASHBOARD PAGE -->
+        <!-- ============================================== -->
+        <div id="dashboard" class="page-content tab-content">
+            <p class="text-xs text-gray-500 mb-4">Dashboard & Referrals</p>
+
+            <!-- Balance Card -->
+            <div class="card p-5 mb-6">
+                <p class="text-lg text-gray-400">Your Balance</p>
+                <p id="user-balance" class="text-5xl font-extrabold text-yellow-400">0</p>
+                <p class="text-sm text-gray-500">Total Points</p>
+            </div>
+
+            <!-- Referral & Link Card -->
+            <div class="card p-5 mb-6">
+                <p class="text-xl font-bold border-b border-gray-700 pb-2 mb-3">Referral & Link</p>
+                <div class="flex justify-between items-center mb-3">
+                    <p class="text-lg text-gray-400">Total Referrals</p>
+                    <p id="total-referrals" class="text-3xl font-bold text-green-400">0</p>
+                </div>
+
+                <p class="text-sm text-yellow-500 mb-2">Your Referral Link (100 Points Bonus)</p>
+                <div class="flex space-x-2">
+                    <input id="referral-link-input" type="text" readonly placeholder="Loading link..." class="flex-grow p-2 text-sm card bg-gray-700 text-white focus:outline-none">
+                    <button id="copy-button" onclick="window.copyRefLink()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-lg">Copy Link</button>
+                </div>
+            </div>
+            
+            <!-- Referral List -->
+            <div class="card p-5 mb-6">
+                <p class="text-lg font-bold border-b border-gray-700 pb-2 mb-3">Your Referral List</p>
+                <ul id="referral-list-container">
+                    <p class="text-sm py-2 text-gray-400">Loading referrals...</p>
+                </ul>
+            </div>
+            
+            <p class="text-xs text-gray-500 text-center mt-6">Your Unique ID: <span id="unique-user-id">Loading...</span></p>
+        </div>
+
+        <!-- ============================================== -->
+        <!-- 2. TASKS PAGE -->
+        <!-- ============================================== -->
+        <div id="tasks" class="page-content tab-content hidden">
+            <p class="text-xs text-gray-500 mb-4">Complete mandatory tasks below.</p>
+            
+            <!-- Wallet Status Card -->
+            <div class="card p-5 mb-6">
+                <p class="text-xl font-bold border-b border-gray-700 pb-2 mb-3">Wallet Setup (Mandatory)</p>
+                
+                <div class="flex justify-between items-center mb-3">
+                    <p class="text-lg text-gray-400">BSC Wallet Status:</p>
+                    <p id="wallet-status" class="text-sm font-semibold text-red-400">REQUIRED</p>
+                </div>
+
+                <input id="wallet-input" type="text" placeholder="Enter your BSC (BEP-20) 0x address" class="w-full p-3 text-sm card bg-gray-700 text-white focus:ring-2 focus:ring-green-500 focus:outline-none mb-3">
+                <button onclick="window.submitWallet()" class="w-full bg-green-600 hover:bg-green-700 text-white font-semibold px-4 py-3 rounded-lg">Save Wallet Address</button>
+                <p id="wallet-msg" class="text-xs mt-2 text-gray-400"></p>
+            </div>
+
+            <!-- Social Tasks Card -->
+            <div class="card p-5 mb-6">
+                <p class="text-xl font-bold border-b border-gray-700 pb-2 mb-3">Social Tasks (Review Required)</p>
+
+                <div class="mb-4">
+                    <p class="text-lg font-medium text-gray-300">Task 1: Follow on X (Twitter)</p>
+                    <p class="text-sm text-gray-400 mb-1">Earn points after manual review.</p>
+                    <a href="https://x.com/jude_bnb" target="_blank" class="text-blue-400 hover:text-blue-300 text-sm font-semibold">🔗 Follow @jude_bnb</a>
+                </div>
+
+                <div class="mb-4">
+                    <p class="text-lg font-medium text-gray-300">Task 2: Join Telegram Group</p>
+                    <p class="text-sm text-gray-400 mb-1">Membership will be checked before withdrawal.</p>
+                    <a href="https://t.me/tokenscreene" target="_blank" class="text-blue-400 hover:text-blue-300 text-sm font-semibold">🔗 Join @tokenscreene Group</a>
+                </div>
+
+                <!-- Submission Form (For X/Twitter Proof) -->
+                <p class="text-md font-semibold text-yellow-500 mt-4 mb-2">Submit X Profile Link for Review:</p>
+                <input id="x-proof-input" type="text" placeholder="https://x.com/yourusername" class="w-full p-3 text-sm card bg-gray-700 text-white focus:ring-2 focus:ring-green-500 focus:outline-none mb-3">
+                <button onclick="window.submitXProof()" class="w-full bg-yellow-600 hover:bg-yellow-700 text-white font-semibold px-4 py-3 rounded-lg">Submit for Review</button>
+                <p id="x-proof-msg" class="text-xs mt-2 text-gray-400">Review status: Pending initial submission.</p>
+            </div>
+        </div>
+
+        <!-- ============================================== -->
+        <!-- 3. WITHDRAW PAGE -->
+        <!-- ============================================== -->
+        <div id="withdraw" class="page-content tab-content hidden">
+            <p class="text-xs text-gray-500 mb-4">Manual withdrawal request form.</p>
+
+            <div class="card p-5 mb-6">
+                <p class="text-2xl font-bold mb-3">Withdraw Points</p>
+
+                <p id="withdraw-min-text" class="text-sm text-yellow-500 mb-4">Minimum Withdrawal: 5,000 Points. Your Wallet: Not Set</p>
+
+                <input id="withdraw-amount-input" type="number" placeholder="Enter Amount (e.g., 5000)" class="w-full p-3 text-sm card bg-gray-700 text-white focus:ring-2 focus:ring-green-500 focus:outline-none mb-3">
+                <button onclick="window.submitWithdrawal()" class="w-full bg-red-600 hover:bg-red-700 text-white font-semibold px-4 py-3 rounded-lg">Submit Manual Withdrawal Request</button>
+                <p id="withdraw-msg" class="text-xs mt-2 text-gray-400">Requests are processed manually by the admin.</p>
+            </div>
+            
+            <div class="card p-5">
+                <p class="text-lg font-semibold text-gray-300">Important Notes</p>
+                <ul class="text-sm text-gray-400 mt-2 list-disc list-inside space-y-1">
+                    <li>Minimum withdrawal is **5,000 Points**.</li>
+                    <li>Ensure your BSC wallet address is set on the **Tasks** page.</li>
+                    <li>Withdrawals are processed manually by the admin (`@Judemonie`).</li>
+                    <li>Processing times vary (24-48 hours).</li>
+                </ul>
+            </div>
+        </div>
+        
+        <!-- ============================================== -->
+        <!-- 4. LEADERBOARD PAGE (BOARD) -->
+        <!-- ============================================== -->
+        <div id="board" class="page-content tab-content hidden">
+            <p class="text-xs text-gray-500 mb-4">Top 10 users by points.</p>
+
+            <div class="card p-5 mb-6">
+                <p class="text-2xl font-bold border-b border-gray-700 pb-2 mb-3 text-yellow-400">🏆 Top Scorers</p>
+                
+                <ul id="leaderboard-list" class="space-y-2">
+                    <!-- Leaderboard items will be injected here -->
+                    <p class="text-sm text-gray-400">Loading leaderboard...</p>
+                </ul>
+            </div>
+        </div>
+
+        <!-- ============================================== -->
+        <!-- 5. ADMIN PAGE (Hidden from non-admin) -->
+        <!-- ============================================== -->
+        <div id="admin" class="page-content tab-content hidden">
+            <p class="text-xs text-red-500 mb-4">ADMIN PANEL - ACCESS RESTRICTED</p>
+
+            <div class="card p-5 mb-6 bg-red-900 border-red-700 border-2">
+                <p class="text-xl font-bold text-white">Pending Withdrawals (<span id="admin-count">0</span>)</p>
+                <p class="text-sm text-gray-300 mb-3">Approve transactions *after* manual crypto payment is sent.</p>
+                <div id="pending-withdrawals-container">
+                    <!-- Pending withdrawal requests injected here -->
+                    <p class="text-sm py-4 text-gray-400">No pending withdrawal requests.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Bottom Navigation Bar (Fixed) -->
+    <div class="fixed bottom-0 left-0 right-0 h-20 bg-[#2a2a2a] border-t border-gray-800 shadow-xl z-20">
+        <div class="grid grid-cols-4 h-full">
+            
+            <label for="radio-dashboard" class="nav-link">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-10v10a1 1 0 001 1h3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                <span class="text-xs mt-1">Dashboard</span>
+            </label>
+
+            <label for="radio-tasks" class="nav-link">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+                <span class="text-xs mt-1">Tasks</span>
+            </label>
+            
+            <label for="radio-withdraw" class="nav-link">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 2v8m0 0a1 1 0 001 1h3m-3 0a1 1 0 00-1 1H7m-4 7h18a2 2 0 002-2V5a2 2 0 00-2-2H3a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                <span class="text-xs mt-1">Withdraw</span>
+            </label>
+            
+            <label for="radio-board" class="nav-link">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                <span class="text-xs mt-1">Board</span>
+            </label>
+            
+            <!-- ADMIN NAV ITEM (Will be hidden/shown by JS based on user ID) -->
+            <label id="admin-nav-item" for="radio-admin" class="nav-link hidden">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2v4a2 2 0 01-2 2h-2m2-4h-2m-3-3h.01M9 16h.01M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                <span class="text-xs mt-1">Admin</span>
+            </label>
+        </div>
+    </div>
+</body>
+</html>
+
